@@ -1,107 +1,121 @@
 import asyncio
 import json
-import os
-from urllib.parse import urlparse, urljoin
-from playwright.async_api import Page, Response, Route, Browser
-import pandas as pd
+import time
+from urllib.parse import urljoin, urlparse
+import sys
+import aiofiles
 from playwright.async_api import async_playwright
-from tqdm.asyncio import tqdm_asyncio
-from fake_headers import Headers
-visited = set()
-semaphore = asyncio.Semaphore(5)
-output_file = "xhr_requests.jsonl"
-api_filter = ['mc.yandex', '.svg']
-url_filter = ['.svg', '.pdf', '.jpg', '.jpeg']
+from pathlib import Path
 
-async def intercept_xhr_requests(page: Page, current_url, base_domain: str):
-    async def handle_route(route: Route):
-        request = route.request
-        if (
-            request.resource_type in ("xhr", "fetch") and
-            not any(f in request.url for f in api_filter) and
-            request.url.startswith(base_domain)
-        ):
-            try:
-                data = {
-                    "page":page.url,
-                    "url": request.url,
-                    "method": request.method,
-                    "headers": dict(request.headers),
-                    "post_data": request.post_data,
-                    "page_url": current_url
-                }
-                with open(output_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(data, ensure_ascii=False) + "\n")
-            except Exception as e:
-                print(f"Error logging request: {e}")
-        await route.continue_()
+VISITED = set()
+DOMAIN = ""
+VISIT_DELAY = 3
+MAX_WORKERS = 3
+TIME_LIMIT = 120
 
-    await page.route("**/*", handle_route)
+start_time = None
+time_limit = None
 
-async def extract_links(page:Page, base_url):
-    anchors = await page.eval_on_selector_all("a", "elements => elements.map(a => a.href)")
-    valid_links = set()
-    for link in anchors:
-        if not link or link.startswith("mailto:") or link.startswith("javascript:"):
-            continue
-        if base_url in link:
-            valid_links.add(link.split("#")[0])  # убираем якоря
-    return valid_links
+start_url = sys.argv[1] if len(sys.argv) > 1 else "https://transport.orgp.spb.ru"
+output_file = start_url
+if 'https://' in output_file:
+    output_file = output_file.removeprefix('https://')
+elif 'http://' in output_file:
+    output_file = output_file.removeprefix('http://')
+else: pass
+output_file = output_file.replace('.', '_').replace('/', '-')
+output_file = Path(f"../db/{output_file}.jsonl")
 
-async def crawl_page(url, browser: Browser, base_domain):
-    headers = Headers(browser="chrome", os="win").generate()
-    async with semaphore:
-        context = await browser.new_context(extra_http_headers=headers)
-        page = await context.new_page()
-        await intercept_xhr_requests(page, url, base_domain)
-        links = set()
+async def save_jsonl(entry: dict):
+    async with aiofiles.open(output_file, mode="a", encoding="utf-8") as f:
+        line = json.dumps(entry, ensure_ascii=False)
+        await f.write(line + "\n")
+
+async def handle_response(response):
+    try:
+        if response.request.resource_type != "xhr":
+            return
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            return
+
+        body = await response.text()
+        entry = {
+            "url": response.url,
+            "status": response.status,
+            "body": json.loads(body)
+        }
+        await save_jsonl(entry)
+    except Exception:
+        pass
+
+async def worker(name, queue, browser):
+    context = await browser.new_context()
+    page = await context.new_page()
+    page.on("response", handle_response)
+
+    global start_time, time_limit
+
+    while True:
+        # Проверка таймаута
+        if time.time() - start_time > time_limit:
+            print(f"Worker {name} timeout reached, exiting")
+            break
+
         try:
-            if any(f in url for f in url_filter):
-                with open(output_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({'page': url}, ensure_ascii=False) + "\n")
+            url = await asyncio.wait_for(queue.get(), timeout=2)
+        except asyncio.TimeoutError:
+            # Очередь могла быть пустой — проверим таймаут ещё раз
+            if time.time() - start_time > time_limit:
+                print(f"Worker {name} timeout on empty queue, exiting")
+                break
             else:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                links = await extract_links(page, base_domain)
-            visited.add(url)
+                continue
+
+        if url in VISITED:
+            queue.task_done()
+            continue
+
+        print(f"Worker {name} processing: {url}")
+        VISITED.add(url)
+
+        try:
+            await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+            await asyncio.sleep(VISIT_DELAY)
+
+            anchors = await page.query_selector_all("a[href]")
+            for a in anchors:
+                href = await a.get_attribute("href")
+                if href:
+                    abs_url = urljoin(url, href.split("#")[0])
+                    if abs_url.startswith(DOMAIN) and abs_url not in VISITED:
+                        await queue.put(abs_url)
         except Exception as e:
-            print(f"[!] Failed to crawl {url}: {e}")
-        finally:
-            await context.close()
-        return links
+            print(f"Error {e} on {url}")
 
+        queue.task_done()
 
-async def crawl_site(start_url, max_pages=10000):
-    parsed_url = urlparse(start_url)
-    base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    await context.close()
+    print(f"Worker {name} done")
 
-    to_visit = set([start_url])
+async def main(start_url, t_limit=60):
+    global DOMAIN, start_time, time_limit
+    DOMAIN = "{uri.scheme}://{uri.netloc}".format(uri=urlparse(start_url))
+    start_time = time.time()
+    time_limit = t_limit
+
+    queue = asyncio.Queue()
+    await queue.put(start_url)
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--ignore-certificate-errors"])
-        pbar = tqdm_asyncio(total=max_pages)
-        total_found = 0
-        while to_visit and len(visited) < max_pages:
-            tasks = []
-            next_batch = set()
-            for url in list(to_visit):
-                if url not in visited and len(visited) + len(tasks) < max_pages:
-                    tasks.append(crawl_page(url, browser, base_domain))
-                    to_visit.remove(url)
-            results = await asyncio.gather(*tasks)
-            for found_links in results:
-                if found_links:
-                    new_links = found_links - visited - to_visit
-                    next_batch |= new_links
-                    total_found += len(new_links)
-            to_visit |= next_batch - visited
-            pbar.update(len(tasks))
-            pbar.total = len(visited) + len(to_visit)
-            pbar.refresh()
-        pbar.close()
+        browser = await p.chromium.launch(headless=True)
+
+        tasks = [asyncio.create_task(worker(f"W{i+1}", queue, browser)) for i in range(MAX_WORKERS)]
+
+        # Ждём, пока все задачи завершатся (само прервётся по таймауту в воркерах)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
         await browser.close()
 
 if __name__ == "__main__":
-    import sys
-    start_url = sys.argv[1] if len(sys.argv) > 1 else "https://orgp.spb.ru/"
-    if os.path.exists(output_file):
-        os.remove(output_file)
-    asyncio.run(crawl_site(start_url))
+    asyncio.run(main(start_url, TIME_LIMIT))
