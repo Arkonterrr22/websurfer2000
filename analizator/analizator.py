@@ -17,7 +17,7 @@ elif 'http://' in output_file:
     output_file = output_file.removeprefix('http://')
 else: pass
 output_file = output_file.replace('.', '_').replace('/', '-')
-output_file = Path(f"../db/{output_file}.jsonl")
+output_file = Path(f"../db/temp{output_file}.jsonl")
 
 def parse_post_data(s):
     if not s or pd.isna(s):
@@ -51,7 +51,7 @@ def load_df():
     df = pd.DataFrame(data)
     cols_to_split = ['url']
     df = split_url_columns(df, cols_to_split).drop(columns=cols_to_split)
-    df = df[(df['body'].apply(lambda x: bool(x))) & (df['status'] == 200)].drop(columns=['status'])   
+    df = df[(df['body'].apply(lambda x: bool(x))) & (df['status'] == 200)].drop(columns=['status'])
     # freq = df['url.5'].value_counts()
     # print(freq)
     return df

@@ -4,7 +4,7 @@ import time
 from urllib.parse import urljoin, urlparse
 import sys
 import aiofiles
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Response
 from pathlib import Path
 
 VISITED = set()
@@ -24,26 +24,29 @@ elif 'http://' in output_file:
     output_file = output_file.removeprefix('http://')
 else: pass
 output_file = output_file.replace('.', '_').replace('/', '-')
-output_file = Path(f"../db/{output_file}.jsonl")
+output_file = Path(f"../db/temp/{output_file}.jsonl")
 
 async def save_jsonl(entry: dict):
     async with aiofiles.open(output_file, mode="a", encoding="utf-8") as f:
         line = json.dumps(entry, ensure_ascii=False)
         await f.write(line + "\n")
 
-async def handle_response(response):
+async def handle_response(response:Response):
     try:
-        if response.request.resource_type != "xhr":
+        request = response.request
+        if request.resource_type not in ("xhr", "fetch"):
             return
         content_type = response.headers.get("content-type", "")
-        if "application/json" not in content_type:
+        if not any(ct in content_type for ct in ("application/json", "application/x-www-form-urlencoded")):
             return
-
+        post_data = await request.post_data_json if request.method != "GET" else None
         body = await response.text()
         entry = {
             "url": response.url,
             "status": response.status,
-            "body": json.loads(body)
+            "method":request.method,
+            "request_body":post_data,
+            "response_body": json.loads(body)
         }
         await save_jsonl(entry)
     except Exception:
