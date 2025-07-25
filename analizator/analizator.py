@@ -81,12 +81,13 @@ def explore_apis(df: pd.DataFrame, desc: pd.DataFrame) -> pd.DataFrame:
                 pathTemplate = {'base':api['general']}
                 for col in results.columns:
                     values = results[col].astype(int).to_numpy()
+                    min_, max_ = values.min(), values.max()
                     multiple_flag, divisor = check_multiples(values)
                     arithmetic_flag, step = check_arithmetic_progression(values)
                     if multiple_flag:
-                        pathTemplate[col]=('*', divisor)
+                        pathTemplate[col]=('*', divisor, min_, max_)
                     elif arithmetic_flag:
-                        pathTemplate[col]=('+', step)
+                        pathTemplate[col]=('+', step, min_, max_)
 
         if queries.shape[0]>0:
             queryTemplate = max(queries, key=len)
