@@ -11,12 +11,12 @@ VISITED = set()
 DOMAIN = ""
 VISIT_DELAY = 3
 MAX_WORKERS = 3
-TIME_LIMIT = 120
+TIME_LIMIT:int = int(sys.argv[2]) if len(sys.argv)>2 else 120
 
 start_time = None
 time_limit = None
 
-start_url = sys.argv[1] if len(sys.argv) > 1 else "https://transport.orgp.spb.ru"
+start_url = sys.argv[1]
 output_file = start_url
 if 'https://' in output_file:
     output_file = output_file.removeprefix('https://')
@@ -24,7 +24,7 @@ elif 'http://' in output_file:
     output_file = output_file.removeprefix('http://')
 else: pass
 output_file = output_file.replace('.', '_').replace('/', '-')
-output_file = Path(f"../db/temp/{output_file}.jsonl")
+output_file = Path(f"./db/temp/{output_file}.jsonl")
 
 async def save_jsonl(entry: dict):
     async with aiofiles.open(output_file, mode="a", encoding="utf-8") as f:
@@ -83,7 +83,7 @@ async def worker(name, queue, browser):
         VISITED.add(url)
 
         try:
-            await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+            await page.goto(url, timeout=25000, wait_until="domcontentloaded")
             await asyncio.sleep(VISIT_DELAY)
 
             anchors = await page.query_selector_all("a[href]")
