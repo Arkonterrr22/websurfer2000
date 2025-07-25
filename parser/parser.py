@@ -60,7 +60,6 @@ async def worker(name, queue, browser):
     global start_time, time_limit
 
     while True:
-        # Проверка таймаута
         if time.time() - start_time > time_limit:
             print(f"Worker {name} timeout reached, exiting")
             break
@@ -68,7 +67,6 @@ async def worker(name, queue, browser):
         try:
             url = await asyncio.wait_for(queue.get(), timeout=2)
         except asyncio.TimeoutError:
-            # Очередь могла быть пустой — проверим таймаут ещё раз
             if time.time() - start_time > time_limit:
                 print(f"Worker {name} timeout on empty queue, exiting")
                 break
@@ -114,8 +112,6 @@ async def main(start_url, t_limit=60):
         browser = await p.chromium.launch(headless=True)
 
         tasks = [asyncio.create_task(worker(f"W{i+1}", queue, browser)) for i in range(MAX_WORKERS)]
-
-        # Ждём, пока все задачи завершатся (само прервётся по таймауту в воркерах)
         await asyncio.gather(*tasks, return_exceptions=True)
 
         await browser.close()
